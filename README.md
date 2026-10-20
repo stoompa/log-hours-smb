@@ -2,6 +2,18 @@
 
 Terminal app for logging working hours in SMB HR from a plain-English phrase.
 
+## Install
+
+Needs [Rust](https://rustup.rs). Installs the `automate-smb` binary into `~/.cargo/bin`
+(make sure it's on your `PATH`):
+
+```
+cargo install --git https://github.com/stoompa/log-hours-smb
+```
+
+Run the same command with `--force` to update. Google Chrome and the 1Password CLI
+(`op`) must be installed separately.
+
 ```
 automate-smb setup             # company tag, 1Password item, API key reference
 automate-smb                   # week-calendar TUI (press ? for keys)
