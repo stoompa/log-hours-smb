@@ -8,7 +8,7 @@ mod worker;
 
 use std::io::{BufRead, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate};
 use clap::{Parser, Subcommand};
 
@@ -85,8 +85,8 @@ async fn main() -> Result<()> {
 
 fn ask(prompt: &str, default: Option<&str>) -> Result<String> {
     match default {
-        Some(d) => print!("{prompt} [{d}]: "),
-        None => print!("{prompt}: "),
+        Some(d) => print!("  {prompt} [{d}]: "),
+        None => print!("  {prompt}: "),
     }
     std::io::stdout().flush()?;
     let mut line = String::new();
@@ -99,71 +99,124 @@ fn ask(prompt: &str, default: Option<&str>) -> Result<String> {
     })
 }
 
+/// Prints a setup step's heading (blank for a follow-up question) and what it asks for.
+fn section(title: &str, lines: &[&str]) {
+    println!();
+    if !title.is_empty() {
+        println!("{title}");
+    }
+    for line in lines {
+        println!("  {line}");
+    }
+}
+
 async fn setup() -> Result<()> {
     let existing = Config::load().ok();
-    let company = ask(
-        "SMB company tag",
-        existing.as_ref().map(|c| c.company_tag.as_str()),
-    )?;
-    let item = ask(
-        "1Password item for SMB",
-        existing.as_ref().map(|c| c.op_item.as_str()),
-    )?;
+    println!("Settings go in {}.", Config::path()?.display());
+    println!("No passwords or keys are stored there; they are read from 1Password when needed.");
+    println!("Press Enter to keep the value shown in [brackets].");
+
+    section(
+        "1/4  SMB login",
+        &["The company tag is what you type on the first SMB login screen (hr.smb.co.uk)."],
+    );
+    let company = loop {
+        let answer = ask(
+            "Company tag",
+            existing.as_ref().map(|c| c.company_tag.as_str()),
+        )?;
+        if !answer.is_empty() {
+            break answer;
+        }
+    };
+    section(
+        "",
+        &[
+            "Your SMB username, password and 2FA code are read from a 1Password login item.",
+            "It needs a username, a password and a one-time password field.",
+        ],
+    );
+    let item = loop {
+        let answer = ask(
+            "1Password item name",
+            existing.as_ref().map(|c| c.op_item.as_str()),
+        )?;
+        if !answer.is_empty() {
+            break answer;
+        }
+    };
     let vault = ask(
-        "1Password vault (blank = search all)",
+        "Vault it is in (leave blank to search all vaults)",
         existing.as_ref().and_then(|c| c.op_vault.as_deref()),
     )?;
+
+    section(
+        "2/4  Normal working day",
+        &[
+            "Used when you stage a normal day (n), fill the week (w) or say \"normal day\".",
+            "Write each block as start-end, separated by spaces; gaps between blocks are breaks.",
+            "Example: 8-1230 1300-1700 means 08:00-12:30, lunch, then 13:00-17:00.",
+        ],
+    );
     let current_day = existing
         .as_ref()
         .map(|c| c.default_day.join(" "))
         .unwrap_or_else(|| "8-1230 1300-1700".into());
     let default_day = loop {
-        let answer = ask(
-            "Normal working day, as blocks with breaks between them (e.g. 8-1230 1300-1700)",
-            Some(&current_day),
-        )?;
+        let answer = ask("Normal day", Some(&current_day))?;
         match model::parse_day_blocks(&answer) {
             Ok(blocks) => break blocks,
             Err(e) => println!("  {e}"),
         }
     };
-    println!("  normal day: {}", default_day.join(", "));
+    println!("  → {}", default_day.join(", "));
     let mut cfg = Config::new(company, item, (!vault.is_empty()).then_some(vault));
     cfg.default_day = default_day;
     setup_llm(&mut cfg, existing.as_ref())?;
     let path = cfg.save()?;
-    println!("saved {}", path.display());
 
-    print!("checking 1Password… ");
+    section("4/4  Checking", &[]);
+    print!("  1Password (approve the prompt if one appears)… ");
     std::io::stdout().flush()?;
-    let creds = secrets::credentials(&cfg).await?;
-    let otp = secrets::otp(&cfg).await?;
+    let creds = secrets::credentials(&cfg).await.context(RERUN)?;
+    let otp = secrets::otp(&cfg).await.context(RERUN)?;
     println!(
         "ok (user {}, one-time code has {} digits)",
         creds.username,
         otp.len()
     );
-    print!("checking {}… ", cfg.provider.label());
+    print!("  {}… ", cfg.provider.label());
     std::io::stdout().flush()?;
-    let key = secrets::api_key(&cfg).await?;
+    let key = secrets::api_key(&cfg).await.context(RERUN)?;
     let parsed = ai::parse(
         &cfg,
         key.as_deref(),
         "normal day today",
         Local::now().date_naive(),
     )
-    .await?;
+    .await
+    .context(RERUN)?;
     println!("ok — \"normal day today\" → {}", parsed.summary);
+    println!("\nAll set. Saved {}.", path.display());
     Ok(())
 }
 
+const RERUN: &str =
+    "setup check failed — settings were saved; fix this and run `log-hours-smb setup` again";
+
 fn setup_llm(cfg: &mut Config, existing: Option<&Config>) -> Result<()> {
+    section(
+        "3/4  AI for reading plain-English phrases",
+        &[
+            "Which service turns phrases like \"normal day but left at 3\" into hours:",
+            "  claude      Anthropic API, needs an Anthropic API key",
+            "  openrouter  openrouter.ai, needs an OpenRouter API key",
+            "  openai      OpenAI, or a local server such as Ollama or LM Studio",
+        ],
+    );
     let current = existing.map(|c| c.provider).unwrap_or_default();
     let provider = loop {
-        let answer = ask(
-            "AI provider: claude, openrouter, or openai (any OpenAI-compatible server, e.g. Ollama)",
-            Some(&format!("{current:?}").to_lowercase()),
-        )?;
+        let answer = ask("Provider", Some(&format!("{current:?}").to_lowercase()))?;
         match Provider::parse(&answer) {
             Some(p) => break p,
             None => println!("  pick claude, openrouter or openai"),
@@ -172,8 +225,15 @@ fn setup_llm(cfg: &mut Config, existing: Option<&Config>) -> Result<()> {
     let same = existing.filter(|c| c.provider == provider);
 
     if provider == Provider::OpenAI {
+        section(
+            "",
+            &[
+                "Where the API lives. Keep the default for OpenAI itself, or use",
+                "http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio.",
+            ],
+        );
         let url = ask(
-            "Base URL (Ollama: http://localhost:11434/v1, LM Studio: http://localhost:1234/v1)",
+            "Base URL",
             Some(
                 same.map(|c| c.base_url())
                     .unwrap_or(provider.default_base_url()),
@@ -187,13 +247,18 @@ fn setup_llm(cfg: &mut Config, existing: Option<&Config>) -> Result<()> {
         (None, Provider::Claude) => Some(config::default_model()),
         (None, _) => None,
     };
-    let hint = match provider {
-        Provider::Claude => "Model (opus, sonnet, haiku, fable or a full id)",
-        Provider::OpenRouter => "Model id as listed on openrouter.ai/models",
-        Provider::OpenAI => "Model name (for Ollama, one from `ollama list`)",
-    };
+    section(
+        "",
+        &[match provider {
+            Provider::Claude => {
+                "Model: haiku is fast, cheap and enough for this; try sonnet if phrases are misread."
+            }
+            Provider::OpenRouter => "Model: its id as listed on openrouter.ai/models.",
+            Provider::OpenAI => "Model: its name (for Ollama, one from `ollama list`).",
+        }],
+    );
     cfg.model = loop {
-        let model = ask(hint, model_default.as_deref())?;
+        let model = ask("Model", model_default.as_deref())?;
         if !model.is_empty() {
             break match provider {
                 Provider::Claude => config::claude_model(&model),
@@ -203,27 +268,38 @@ fn setup_llm(cfg: &mut Config, existing: Option<&Config>) -> Result<()> {
     };
 
     let local = provider == Provider::OpenAI && cfg.base_url.is_some();
-    let env_set = std::env::var(provider.key_env()).is_ok_and(|k| !k.is_empty());
+    let env = provider.key_env();
+    let env_set = std::env::var(env).is_ok_and(|k| !k.is_empty());
+    let blank = if env_set {
+        format!("{env} is set in this shell, so you can leave this blank to use it.")
+    } else if local {
+        "A local server usually needs no key; leave this blank.".to_string()
+    } else {
+        format!("Or leave it blank and set {env} in your shell profile instead.")
+    };
+    section(
+        "",
+        &[
+            "API key: don't paste the key itself here. Save it in 1Password, right-click",
+            "the field, choose Copy Secret Reference and paste that (it starts with op://).",
+            &blank,
+        ],
+    );
     let key_ref = loop {
         let key_ref = ask(
-            &format!(
-                "op:// reference for the API key (blank = use {}{})",
-                provider.key_env(),
-                if local {
-                    ", or none for a local server"
-                } else {
-                    ""
-                }
-            ),
+            "Secret reference",
             same.and_then(|c| c.api_key_ref.as_deref()),
         )?;
+        if !key_ref.is_empty() && !key_ref.starts_with("op://") {
+            println!(
+                "  that isn't an op:// reference, so it wasn't saved; paste the Secret Reference instead"
+            );
+            continue;
+        }
         if !key_ref.is_empty() || env_set || local {
             break key_ref;
         }
-        println!(
-            "  {} isn't set — enter an op:// reference (1Password: item → field → Copy Secret Reference)",
-            provider.key_env()
-        );
+        println!("  {env} isn't set in this shell, so a secret reference is needed");
     };
     cfg.provider = provider;
     cfg.api_key_ref = (!key_ref.is_empty()).then_some(key_ref);

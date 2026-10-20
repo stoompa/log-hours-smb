@@ -100,7 +100,9 @@ impl Config {
         if let Some(path) = std::env::var_os("LOG_HOURS_SMB_CONFIG") {
             return Ok(PathBuf::from(path));
         }
-        let config = dirs::home_dir().context("no home directory")?.join(".config");
+        let config = dirs::home_dir()
+            .context("no home directory")?
+            .join(".config");
         let dir = config.join("log-hours-smb");
         // Carry over the config from before the rename from automate-smb.
         let old = config.join("automate-smb");

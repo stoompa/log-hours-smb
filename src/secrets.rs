@@ -82,6 +82,10 @@ pub async fn api_key(cfg: &Config) -> Result<Option<String>> {
         return Ok(Some(key));
     }
     match cfg.api_key_ref.as_deref() {
+        // Checked here so a pasted key is never handed to `op` and echoed in its error.
+        Some(reference) if !reference.starts_with("op://") => {
+            bail!("`api_key_ref` must be an op:// reference — run setup again")
+        }
         Some(reference) => Ok(Some(op(&["read", reference]).await?)),
         None if cfg.provider == Provider::OpenAI && cfg.base_url.is_some() => Ok(None),
         None => bail!("set {env} or `api_key_ref` in the config"),
