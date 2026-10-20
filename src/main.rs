@@ -91,7 +91,14 @@ fn ask(prompt: &str, default: Option<&str>) -> Result<String> {
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
-    let line = line.trim().to_string();
+    // Pasted values often come wrapped in quotes, e.g. a copied 1Password reference.
+    let line = line.trim();
+    let line = ['"', '\'']
+        .iter()
+        .find_map(|&q| line.strip_prefix(q)?.strip_suffix(q))
+        .unwrap_or(line)
+        .trim()
+        .to_string();
     Ok(if line.is_empty() {
         default.unwrap_or_default().to_string()
     } else {
