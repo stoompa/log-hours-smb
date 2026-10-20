@@ -10,10 +10,10 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::ai::{self, Parsed};
@@ -106,6 +106,16 @@ impl Kind {
             Kind::Exists => "already in SMB".into(),
             Kind::Conflict(c) => format!("overlaps {c}"),
             Kind::Failed(e) => format!("failed: {e}"),
+        }
+    }
+
+    fn accent(&self) -> Color {
+        match self {
+            Kind::Logged => Color::LightBlue,
+            Kind::Loading => Color::Yellow,
+            Kind::New => Color::Green,
+            Kind::Exists => Color::Gray,
+            Kind::Conflict(_) | Kind::Failed(_) => Color::Red,
         }
     }
 
@@ -218,8 +228,12 @@ fn duration(start: NaiveTime, end: NaiveTime) -> String {
     hours((end - start).num_minutes())
 }
 
+/// Durations read as `4h30` so they never look like a time of day.
 fn hours(minutes: i64) -> String {
-    format!("{}:{:02}", minutes / 60, minutes % 60)
+    match minutes % 60 {
+        0 => format!("{}h", minutes / 60),
+        m => format!("{}h{m:02}", minutes / 60),
+    }
 }
 
 /// Pads or truncates to exactly `width` characters.
@@ -749,39 +763,8 @@ impl App {
         self.draw_day(f, day);
         self.draw_week(f, grid);
         self.draw_ask(f, ask);
-
-        let visible = log.height.saturating_sub(2) as usize;
-        let lines: Vec<Line> = self
-            .log
-            .iter()
-            .rev()
-            .take(visible)
-            .rev()
-            .map(|l| Line::from(l.as_str()))
-            .collect();
-        f.render_widget(
-            Paragraph::new(lines).dim().block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .title(" Log "),
-            ),
-            log,
-        );
-
-        let hint = match (&self.flash, &self.mode) {
-            (Some(msg), _) => Line::from(format!(" {msg}")).yellow(),
-            (None, Mode::Normal) => Line::from(
-                " ←→ day  [ ] week  t today  ↑↓ block  a add  e edit  d delete  n normal day  w fill week  y/p copy/paste  / ask AI  s submit  ? help",
-            )
-            .dim(),
-            (None, Mode::Phrase(_)) => Line::from(" Enter send  Esc cancel").dim(),
-            (None, Mode::Editor(_)) => Line::from(
-                " Tab/←→ field  ↑↓ ±15 min (⇧ ±1 h)  type 0830  Enter save  Esc cancel",
-            )
-            .dim(),
-            (None, _) => Line::from("").dim(),
-        };
-        f.render_widget(hint, help);
+        self.draw_log(f, log);
+        self.draw_hints(f, help);
 
         match &self.mode {
             Mode::Editor(ed) => self.draw_editor(f, ed),
@@ -818,39 +801,60 @@ impl App {
             .filter(|e| week_start(e.date) == monday)
             .map(|e| (e.end - e.start).num_minutes())
             .sum();
+        let target: i64 = self
+            .cfg
+            .default_blocks()
+            .iter()
+            .map(|&(s, e)| (e - s).num_minutes())
+            .sum::<i64>()
+            * 5;
         let left = Line::from(vec![
-            " SMB hours ".bold().reversed(),
+            " SMB hours ".bold().fg(Color::White).bg(SMB_BLUE),
             "  ".into(),
             dot,
-            format!(" {state}").into(),
+            Span::from(format!(" {state}")).dim(),
+            "    ".into(),
+            format!("Week {}", self.cursor.iso_week().week()).bold(),
             format!(
-                "   week {} · {} – {}",
-                self.cursor.iso_week().week(),
+                "  {} – {}",
                 monday.format("%d %b"),
                 sunday.format("%d %b %Y")
             )
-            .bold(),
+            .into(),
         ]);
-        let right = Line::from(vec![
+        let mut right = vec![
             "logged ".dim(),
             hours(week_logged).fg(Color::LightBlue).bold(),
             "  new ".dim(),
             hours(week_new).green().bold(),
-            " ".into(),
+        ];
+        if target > 0 && area.width >= 100 {
+            right.push(format!(" / {}  ", hours(target)).dim());
+            right.extend(progress(week_logged, week_new, target, 12));
+        }
+        right.push(" ".into());
+        let right = Line::from(right).right_aligned();
+        let [left_area, _] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(right.width() as u16 + 1),
         ])
-        .right_aligned();
-        f.render_widget(left, area);
+        .areas(area);
+        f.render_widget(left, left_area);
         f.render_widget(right, area);
     }
 
     fn draw_month(&self, f: &mut Frame, area: Rect) {
         let first = self.cursor.with_day(1).unwrap();
-        let mut lines = vec![Line::from(" Mo Tu We Th Fr Sa Su").dim()];
+        let cursor_week = week_start(self.cursor);
+        let mut lines = vec![Line::from("  Mo Tu We Th Fr Sa Su").dim()];
         let mut date = week_start(first);
         while date.month() == first.month() || date < first {
-            let mut spans = vec![Span::from(" ")];
+            let mut spans = vec![if date == cursor_week {
+                "▸".cyan()
+            } else {
+                " ".into()
+            }];
             for _ in 0..7 {
-                let text = format!("{:>2}", date.day());
                 let mut style = Style::new();
                 if date.month() != first.month() {
                     style = style.fg(Color::DarkGray);
@@ -867,19 +871,17 @@ impl App {
                     style = style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
                 }
                 if date == self.cursor {
-                    style = style.add_modifier(Modifier::REVERSED);
+                    style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
                 }
-                spans.push(Span::styled(text, style));
                 spans.push(" ".into());
+                spans.push(Span::styled(format!("{:>2}", date.day()), style));
                 date += days(1);
             }
             lines.push(Line::from(spans));
         }
         f.render_widget(
-            Paragraph::new(lines).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .title(Line::from(format!(" {} ", first.format("%B %Y"))).centered()),
+            Paragraph::new(lines).centered().block(
+                panel(format!(" {} ", first.format("%B %Y"))).title_alignment(Alignment::Center),
             ),
             area,
         );
@@ -888,56 +890,63 @@ impl App {
     fn draw_day(&self, f: &mut Frame, area: Rect) {
         let blocks = self.day_blocks(self.cursor);
         let total: i64 = blocks.iter().map(|b| (b.end - b.start).num_minutes()).sum();
+        let mut title = vec![Span::from(format!(" {} ", self.cursor.format("%A %d %b")))];
+        if self.cursor == self.today {
+            title.push("today ".cyan());
+        }
+        let block = panel(title).title_bottom(
+            Line::from(vec![" total ".dim(), hours(total).bold(), " ".into()]).right_aligned(),
+        );
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let [list, key] = if inner.height >= 6 {
+            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner)
+        } else {
+            [inner, Rect::default()]
+        };
+
         let mut lines: Vec<Line> = Vec::new();
         if self.logged(self.cursor).is_none() {
             let msg = match self.smb {
-                Smb::Ready => format!("{} loading from SMB…", self.spinner()),
-                _ => "waiting for SMB…".to_string(),
+                Smb::Ready => format!(" {} loading from SMB…", self.spinner()),
+                _ => " waiting for SMB…".to_string(),
             };
             lines.push(Line::from(msg).dim());
         }
         for (i, b) in blocks.iter().enumerate() {
             let selected = i == self.sel;
-            let base = if selected {
-                Style::new().reversed()
+            let time = Span::from(format!(" {}–{} ", fmt_time(b.start), fmt_time(b.end)));
+            let length = Span::from(format!("{:>6} ", duration(b.start, b.end)));
+            let (time, length) = if selected {
+                (time.reversed().bold(), length.reversed())
             } else {
-                Style::new()
+                (time, length.dim())
             };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {} ", b.kind.icon()), b.kind.style()),
-                Span::styled(
-                    format!(
-                        " {}–{}  {:>5} ",
-                        fmt_time(b.start),
-                        fmt_time(b.end),
-                        duration(b.start, b.end)
-                    ),
-                    base,
-                ),
+                time,
+                length,
             ]));
             if selected {
-                lines.push(Line::from(format!("    {}", b.kind.label())).dim().italic());
+                lines.push(Line::from(format!("   ↳ {}", b.kind.label())).fg(b.kind.accent()));
             }
         }
         if blocks.is_empty() && self.logged(self.cursor).is_some() {
-            lines.push(Line::from("nothing logged").dim());
-            lines.push(Line::from("a add · n normal day").dim());
+            lines.push(Line::from(" nothing logged yet").dim());
+            lines.push(Line::from(vec![
+                " ".into(),
+                "a".cyan().bold(),
+                " add  ".dim(),
+                "n".cyan().bold(),
+                " normal day".dim(),
+            ]));
         }
-        f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .title(format!(" {} ", self.cursor.format("%A %d %b")))
-                    .title_bottom(Line::from(format!(" {} ", hours(total))).right_aligned()),
-            ),
-            area,
-        );
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), list);
+        f.render_widget(Paragraph::new(legend(" ").to_vec()), key);
     }
 
     fn draw_week(&self, f: &mut Frame, area: Rect) {
-        let outer = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .title(" Week ");
+        let outer = panel(" Week ");
         let inner = outer.inner(area);
         f.render_widget(outer, area);
 
@@ -947,20 +956,32 @@ impl App {
             .map(|d| (d, self.day_blocks(d)))
             .collect();
 
-        let (mut first_hour, mut last_hour) = (7, 19);
+        let (mut first_hour, mut last_hour) = (8, 18);
         for (_, blocks) in &week {
             for b in blocks {
                 first_hour = first_hour.min(b.start.hour());
                 last_hour = last_hour.max(b.end.hour() + u32::from(b.end.minute() > 0));
             }
         }
-        let rows_available = inner.height.saturating_sub(2) as u32;
-        let slot_minutes: u32 = if rows_available >= (last_hour - first_hour) * 2 {
-            30
-        } else {
-            60
-        };
-        let slots = (last_hour - first_hour) * 60 / slot_minutes;
+        // Header, totals and a rule take three rows; the day gets the rest.
+        let rows = inner.height.saturating_sub(3) as u32;
+        let slot_minutes: u32 = [15, 30, 60]
+            .into_iter()
+            .find(|m| (last_hour - first_hour) * 60 / m <= rows)
+            .unwrap_or(60);
+        // Show a little more of the morning and evening when rows are spare.
+        let per_hour = 60 / slot_minutes;
+        let mut later = true;
+        while (last_hour - first_hour + 1) * per_hour <= rows && (first_hour > 6 || last_hour < 21)
+        {
+            if (later && last_hour < 21) || first_hour <= 6 {
+                last_hour += 1;
+            } else {
+                first_hour -= 1;
+            }
+            later = !later;
+        }
+        let slots = (last_hour - first_hour) * per_hour;
 
         let gutter = 6usize;
         let col_w = ((inner.width as usize).saturating_sub(gutter) / 7).max(4);
@@ -969,42 +990,54 @@ impl App {
         let mut header = vec![Span::from(" ".repeat(gutter))];
         let mut totals = vec![Span::from(" ".repeat(gutter))];
         for (date, blocks) in &week {
+            let weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
             let mut style = Style::new().bold();
-            if matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+            if weekend {
                 style = style.dim();
             }
             if *date == self.today {
-                style = style.fg(Color::Cyan);
+                style = style.cyan();
             }
             if *date == self.cursor {
-                style = style.reversed();
+                style = Style::new().bold().black().on_cyan();
             }
-            header.push(Span::styled(
-                fit(&date.format(" %a %d").to_string(), cell_w),
-                style,
-            ));
+            let mut label = date.format(" %a %d").to_string();
+            if *date == self.today {
+                label.push_str(" •");
+            }
+            header.push(Span::styled(fit(&label, cell_w), style));
             header.push(" ".into());
+
             let minutes: i64 = blocks.iter().map(|b| (b.end - b.start).num_minutes()).sum();
             let text = if minutes > 0 {
                 format!(" {}", hours(minutes))
             } else {
                 String::new()
             };
-            totals.push(Span::styled(fit(&text, cell_w), Style::new().dim()));
+            let mut style = if blocks.iter().any(|b| b.pending.is_some()) {
+                Style::new().green()
+            } else {
+                Style::new().fg(Color::LightBlue)
+            };
+            if weekend {
+                style = style.dim();
+            }
+            totals.push(Span::styled(fit(&text, cell_w), style));
             totals.push(" ".into());
         }
-        let mut lines = vec![Line::from(header), Line::from(totals)];
+        let rule = Line::from("─".repeat(inner.width as usize)).fg(Color::DarkGray);
+        let mut lines = vec![Line::from(header), Line::from(totals), rule];
 
+        let now = Local::now();
+        let now = (now.date_naive() == self.today).then(|| now.time());
+        let minute_of = |t: NaiveTime| t.hour() * 60 + t.minute();
         for slot in 0..slots {
             let minute = first_hour * 60 + slot * slot_minutes;
             let at = NaiveTime::from_hms_opt(minute / 60, minute % 60, 0).unwrap();
             let slot_end = at + chrono::Duration::minutes(slot_minutes as i64);
-            let label = if minute.is_multiple_of(60) {
-                fmt_time(at)
-            } else {
-                String::new()
-            };
-            let mut spans = vec![Span::from(fit(&label, gutter)).dim()];
+            let on_hour = minute.is_multiple_of(60);
+            let label = if on_hour { fmt_time(at) } else { String::new() };
+            let mut spans = vec![Span::from(fit(&label, gutter)).fg(Color::DarkGray)];
             for (date, blocks) in &week {
                 let hit = blocks
                     .iter()
@@ -1012,21 +1045,48 @@ impl App {
                     .find(|(_, b)| b.start < slot_end && b.end > at);
                 let span = match hit {
                     Some((i, b)) => {
-                        let text = if b.start >= at {
-                            format!(" {}-{}", fmt_time(b.start), fmt_time(b.end))
-                        } else {
-                            String::new()
+                        let row = slot
+                            .saturating_sub((minute_of(b.start) - first_hour * 60) / slot_minutes);
+                        let (start, end) = (fmt_time(b.start), fmt_time(b.end));
+                        let length = duration(b.start, b.end);
+                        // Wide columns fit the range on one row; narrow ones stack it.
+                        let text = match (row, cell_w) {
+                            (0, 13..) => format!("{start}–{end}"),
+                            (0, _) => start,
+                            (1, 7..=12) => format!("–{end}"),
+                            (1, ..=6) => end,
+                            (1, 13..) | (2, 7..) => format!("{} {length}", b.kind.icon()),
+                            (2, _) => length,
+                            _ => String::new(),
                         };
+                        let selected = *date == self.cursor && i == self.sel;
                         let mut style = b.kind.style();
-                        if *date == self.cursor && i == self.sel {
-                            style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+                        if row == 0 || selected {
+                            style = style.add_modifier(Modifier::BOLD);
                         }
-                        Span::styled(fit(&text, cell_w), style)
+                        let edge = match (cell_w, selected) {
+                            (..=6, true) => {
+                                style = style.add_modifier(Modifier::UNDERLINED);
+                                ""
+                            }
+                            (..=6, false) => "",
+                            (_, true) => "▌",
+                            (_, false) => " ",
+                        };
+                        Span::styled(fit(&format!("{edge}{text}"), cell_w), style)
                     }
-                    None if *date == self.cursor => {
-                        Span::styled(fit(" ·", cell_w), Style::new().fg(Color::DarkGray))
+                    None if *date == self.today && now.is_some_and(|t| at <= t && t < slot_end) => {
+                        Span::from("━".repeat(cell_w)).red()
                     }
-                    None => Span::from(fit("", cell_w)),
+                    None if on_hour => {
+                        let style = if *date == self.cursor {
+                            Style::new().cyan().dim()
+                        } else {
+                            Style::new().fg(Color::DarkGray)
+                        };
+                        Span::styled("┈".repeat(cell_w), style)
+                    }
+                    None => Span::from(" ".repeat(cell_w)),
                 };
                 spans.push(span);
                 spans.push(" ".into());
@@ -1038,49 +1098,118 @@ impl App {
 
     fn draw_ask(&self, f: &mut Frame, area: Rect) {
         let ai = format!(" {} ", self.cfg.provider.label());
-        let (text, style, title) = match &self.mode {
+        let (line, title) = match &self.mode {
             Mode::Phrase(input) => (
-                format!("{input}▏"),
-                Style::new(),
-                " Describe your hours — e.g. \"normal week but Friday off\" ",
+                Line::from(vec!["› ".cyan().bold(), input.clone().into(), "▏".cyan()]),
+                " Describe your hours — e.g. \"normal week but Friday off\" ".to_string(),
             ),
             Mode::Parsing => (
-                format!("{} thinking…", self.spinner()),
-                Style::new().dim(),
-                ai.as_str(),
+                Line::from(format!("{} thinking…", self.spinner())).dim(),
+                ai,
             ),
             Mode::Submitting => (
-                format!("{} submitting to SMB…", self.spinner()),
-                Style::new().yellow(),
-                " SMB ",
+                Line::from(format!("{} submitting to SMB…", self.spinner())).yellow(),
+                " SMB ".to_string(),
             ),
-            _ if !self.summary.is_empty() => {
-                (self.summary.clone(), Style::new().italic(), ai.as_str())
-            }
+            _ if self.summary.starts_with("error:") => (Line::from(self.summary.clone()).red(), ai),
+            _ if !self.summary.is_empty() => (
+                Line::from(vec!["✦ ".cyan(), self.summary.clone().italic()]),
+                ai,
+            ),
             _ => (
-                "press / to describe your hours in plain English".into(),
-                Style::new().dim(),
-                ai.as_str(),
+                Line::from(vec![
+                    "press ".dim(),
+                    "/".cyan().bold(),
+                    " to describe your hours in plain English".dim(),
+                ]),
+                ai,
             ),
         };
-        let border = if matches!(self.mode, Mode::Phrase(_)) {
-            Style::new().cyan()
-        } else {
-            Style::new()
-        };
+        let mut block = panel(title).padding(Padding::horizontal(1));
+        if matches!(self.mode, Mode::Phrase(_)) {
+            block = block.border_style(Style::new().cyan());
+        }
+        f.render_widget(Paragraph::new(line).block(block), area);
+    }
+
+    fn draw_log(&self, f: &mut Frame, area: Rect) {
+        let visible = area.height.saturating_sub(2) as usize;
+        let lines: Vec<Line> = self
+            .log
+            .iter()
+            .rev()
+            .take(visible)
+            .rev()
+            .map(|l| {
+                let (time, msg) = l.split_once(' ').unwrap_or(("", l));
+                let style = if msg.contains("fail") || msg.contains("error") {
+                    Style::new().red()
+                } else {
+                    Style::new().fg(Color::Gray)
+                };
+                Line::from(vec![
+                    Span::from(format!("{time}  ")).fg(Color::DarkGray),
+                    Span::styled(msg.to_string(), style),
+                ])
+            })
+            .collect();
         f.render_widget(
-            Paragraph::new(text).style(style).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(border)
-                    .title(title),
-            ),
+            Paragraph::new(lines).block(panel(" Log ").padding(Padding::horizontal(1))),
             area,
         );
     }
 
+    fn draw_hints(&self, f: &mut Frame, area: Rect) {
+        let line = if let Some(msg) = &self.flash {
+            let style = if self.quit_armed {
+                Style::new().red().bold()
+            } else {
+                Style::new().yellow()
+            };
+            Line::from(Span::styled(format!(" ● {msg}"), style))
+        } else {
+            match self.mode {
+                Mode::Normal => {
+                    let mut pairs = vec![
+                        ("←→", "day"),
+                        ("[ ]", "week"),
+                        ("↑↓", "block"),
+                        ("a", "add"),
+                        ("s", "submit"),
+                        ("/", "ask AI"),
+                        ("n", "normal day"),
+                        ("e", "edit"),
+                        ("d", "delete"),
+                        ("w", "fill week"),
+                        ("y/p", "copy/paste"),
+                        ("t", "today"),
+                        ("?", "help"),
+                    ];
+                    // On narrow terminals drop the extras but keep "? help" visible.
+                    while pairs.len() > 1 && key_hints(&pairs).width() > area.width as usize {
+                        pairs.remove(pairs.len() - 2);
+                    }
+                    key_hints(&pairs)
+                }
+                Mode::Phrase(_) => key_hints(&[("Enter", "send"), ("Esc", "cancel")]),
+                Mode::Editor(_) => key_hints(&[
+                    ("Tab/←→", "field"),
+                    ("↑↓", "±15 min"),
+                    ("⇧↑↓", "±1 h"),
+                    ("0830", "type a time"),
+                    ("Enter", "save"),
+                    ("Esc", "cancel"),
+                ]),
+                Mode::Confirm => key_hints(&[("Enter/y", "submit"), ("any key", "cancel")]),
+                Mode::Help => key_hints(&[("any key", "close")]),
+                Mode::Parsing | Mode::Submitting => Line::default(),
+            }
+        };
+        f.render_widget(line, area);
+    }
+
     fn draw_editor(&self, f: &mut Frame, ed: &Editor) {
-        let area = centered(f.area(), 44, 10);
+        let area = centered(f.area(), 46, 11);
         f.render_widget(Clear, area);
         let field = |name: &str, value: String, this: Field| {
             let active = ed.field == this;
@@ -1089,7 +1218,6 @@ impl App {
             } else {
                 value
             };
-            let line = vec![Span::from(format!("  {name:<8}")).dim()];
             let shown = if active {
                 Span::from(format!(" ‹ {value} › "))
                     .black()
@@ -1098,29 +1226,36 @@ impl App {
             } else {
                 Span::from(format!("   {value}   "))
             };
-            Line::from([line, vec![shown]].concat())
+            Line::from(vec![Span::from(format!("  {name:<8}")).dim(), shown])
         };
-        let valid = ed.start < ed.end;
+        let clash = self.day_blocks(ed.date).into_iter().find(|b| {
+            !(b.pending.is_some() && b.pending == ed.index) && b.start < ed.end && ed.start < b.end
+        });
+        let status = if ed.start >= ed.end {
+            Span::from("end must be after start").red()
+        } else if let Some(b) = clash {
+            Span::from(format!(
+                "overlaps {}–{}",
+                fmt_time(b.start),
+                fmt_time(b.end)
+            ))
+            .red()
+        } else {
+            Span::from(duration(ed.start, ed.end)).green().bold()
+        };
         let lines = vec![
             Line::from(""),
             field(
                 "Date",
-                ed.date.format("%a %d/%m/%Y").to_string(),
+                ed.date.format("%a %d %b %Y").to_string(),
                 Field::Date,
             ),
             field("Start", fmt_time(ed.start), Field::Start),
             field("End", fmt_time(ed.end), Field::End),
             Line::from(""),
-            Line::from(vec![
-                Span::from("  Length  ").dim(),
-                if valid {
-                    Span::from(duration(ed.start, ed.end)).green().bold()
-                } else {
-                    Span::from("end must be after start").red()
-                },
-            ]),
+            Line::from(vec![Span::from("  Length    ").dim(), status]),
             Line::from(""),
-            Line::from("  ↑↓ adjust · Tab next · Enter save").dim(),
+            key_hints(&[("↑↓", "adjust"), ("Tab", "next"), ("Enter", "save")]),
         ];
         let title = if ed.index.is_some() {
             " Edit block "
@@ -1128,20 +1263,15 @@ impl App {
             " New block "
         };
         f.render_widget(
-            Paragraph::new(lines).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().cyan())
-                    .title(title),
-            ),
+            Paragraph::new(lines).block(panel(title).border_style(Style::new().cyan())),
             area,
         );
     }
 
     fn draw_confirm(&self, f: &mut Frame) {
         let items = self.submittable();
-        let height = (items.len() as u16 + 6).min(f.area().height.saturating_sub(2));
-        let area = centered(f.area(), 52, height);
+        let height = (items.len() as u16 + 7).min(f.area().height.saturating_sub(2));
+        let area = centered(f.area(), 46, height);
         f.render_widget(Clear, area);
         let total: i64 = items
             .iter()
@@ -1149,82 +1279,142 @@ impl App {
             .map(|e| (e.end - e.start).num_minutes())
             .sum();
         let mut lines = vec![Line::from("")];
+        let mut last = None;
         for &i in &items {
             let e = &self.pending[i].entry;
+            let day = if last == Some(e.date) {
+                String::new()
+            } else {
+                e.date.format("%a %d %b").to_string()
+            };
+            last = Some(e.date);
             lines.push(Line::from(vec![
-                "  + ".green(),
-                format!(
-                    "{}  {}–{}  {:>5}",
-                    e.date.format("%a %d/%m"),
-                    fmt_time(e.start),
-                    fmt_time(e.end),
-                    duration(e.start, e.end)
-                )
-                .into(),
+                Span::from(format!("  {day:<12}")).bold(),
+                Span::styled(" + ", Kind::New.style()),
+                format!(" {}–{} ", fmt_time(e.start), fmt_time(e.end)).into(),
+                format!("{:>6}", duration(e.start, e.end)).dim(),
             ]));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            "  Total ".dim(),
-            hours(total).bold(),
-            "    Enter/y submit · any other key cancels".dim(),
+            Span::from(format!("  {:<29}", "Total")).dim(),
+            format!("{:>6}", hours(total)).green().bold(),
         ]));
+        lines.push(Line::from(""));
+        lines.push(key_hints(&[("Enter/y", "submit"), ("any key", "cancel")]));
         f.render_widget(
             Paragraph::new(lines).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().green())
-                    .title(format!(" Submit {} block(s) to SMB? ", items.len())),
+                panel(format!(" Submit {} block(s) to SMB? ", items.len()))
+                    .border_style(Style::new().green()),
             ),
             area,
         );
     }
 }
 
+/// A rounded panel with a quiet border, so the content carries the colour.
+fn panel<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(title.into().bold())
+}
+
+/// `key description` pairs with the keys picked out.
+fn key_hints(pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = vec![Span::from(" ")];
+    for (key, what) in pairs {
+        spans.push(Span::from(key.to_string()).cyan().bold());
+        spans.push(Span::from(format!(" {what}   ")).dim());
+    }
+    Line::from(spans)
+}
+
+/// What the block colours mean.
+fn legend(indent: &str) -> [Line<'static>; 2] {
+    let chip = |kind: Kind, text: &'static str| {
+        vec![
+            Span::styled(format!(" {} ", kind.icon()), kind.style()),
+            Span::from(text).dim(),
+        ]
+    };
+    let row = |a: Vec<Span<'static>>, b: Vec<Span<'static>>| {
+        Line::from([vec![Span::from(indent.to_string())], a, b].concat())
+    };
+    [
+        row(chip(Kind::Logged, " in SMB  "), chip(Kind::New, " new")),
+        row(
+            chip(Kind::Exists, " exists  "),
+            chip(Kind::Conflict(String::new()), " clash"),
+        ),
+    ]
+}
+
+/// Logged hours in blue, staged ones in green, the rest of the target empty.
+fn progress(logged: i64, new: i64, target: i64, width: usize) -> Vec<Span<'static>> {
+    let cells = |minutes: i64| ((minutes * width as i64 / target) as usize).min(width);
+    let blue = cells(logged);
+    let green = cells(logged + new) - blue;
+    vec![
+        Span::from("━".repeat(blue)).fg(Color::LightBlue),
+        Span::from("━".repeat(green)).green(),
+        Span::from("─".repeat(width - blue - green)).fg(Color::DarkGray),
+    ]
+}
+
 fn draw_help(f: &mut Frame) {
-    let rows = [
-        ("←/→  h/l", "previous / next day"),
-        ("[ ]  ⇧←/→  PgUp/PgDn", "previous / next week"),
-        ("t", "jump to today"),
-        ("↑/↓  k/j", "select a block in the day"),
-        ("a", "add a block (time picker)"),
-        ("e / Enter", "edit the selected new block"),
-        ("d / Del", "delete the selected new block"),
-        ("D", "clear all new blocks on this day"),
-        ("n", "stage your normal day on this day"),
-        ("w", "stage your normal day on every empty weekday"),
-        ("y / p", "copy this day's blocks / paste onto this day"),
-        ("/  i", "describe hours in plain English (AI)"),
-        ("s", "review and submit new blocks to SMB"),
-        ("r", "reload this week from SMB (or retry login)"),
-        ("q / Esc", "quit"),
+    let sections: [(&str, &[(&str, &str)]); 3] = [
+        (
+            "Move around",
+            &[
+                ("←/→  h/l", "previous / next day"),
+                ("[ ]  ⇧←/→  PgUp/PgDn", "previous / next week"),
+                ("t", "jump to today"),
+                ("↑/↓  k/j", "select a block in the day"),
+            ],
+        ),
+        (
+            "Stage blocks",
+            &[
+                ("a", "add a block (time picker)"),
+                ("e / Enter", "edit the selected new block"),
+                ("d / Del", "delete the selected new block"),
+                ("D", "clear all new blocks on this day"),
+                ("n", "stage your normal day on this day"),
+                ("w", "stage your normal day on every empty weekday"),
+                ("y / p", "copy this day's blocks / paste onto this day"),
+                ("/  i", "describe hours in plain English (AI)"),
+            ],
+        ),
+        (
+            "SMB",
+            &[
+                ("s", "review and submit new blocks to SMB"),
+                ("r", "reload this week from SMB (or retry login)"),
+                ("q / Esc", "quit"),
+            ],
+        ),
     ];
-    let area = centered(f.area(), 66, rows.len() as u16 + 6);
+    let rows: usize = sections.iter().map(|(_, keys)| keys.len() + 2).sum();
+    let area = centered(f.area(), 66, rows as u16 + 5);
     f.render_widget(Clear, area);
     let mut lines = vec![Line::from("")];
-    for (k, v) in rows {
-        lines.push(Line::from(vec![
-            Span::from(format!("  {k:<22}")).cyan(),
-            Span::from(v),
-        ]));
+    for (title, keys) in sections {
+        lines.push(Line::from(format!("  {title}")).bold());
+        for (k, v) in keys {
+            lines.push(Line::from(vec![
+                Span::from(format!("    {k:<22}")).cyan(),
+                Span::from(*v),
+            ]));
+        }
+        lines.push(Line::from(""));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        "  ".into(),
-        " ✓ ".fg(Color::White).bg(SMB_BLUE),
-        " in SMB   ".into(),
-        " + ".black().on_green(),
-        " new   ".into(),
-        " = ".white().on_dark_gray(),
-        " already there   ".into(),
-        " ! ".white().on_red(),
-        " conflict".into(),
-    ]));
+    lines.extend(legend("    "));
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .title(" Keys — any key to close "),
+            panel(" Keys ")
+                .border_style(Style::new().cyan())
+                .title_bottom(Line::from(" any key to close ").dim().right_aligned()),
         ),
         area,
     );
@@ -1286,6 +1476,10 @@ mod tests {
     fn render(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
+        render_buf(&terminal)
+    }
+
+    fn render_buf(terminal: &Terminal<TestBackend>) -> String {
         let buf = terminal.backend().buffer().clone();
         (0..buf.area.height)
             .map(|y| {
@@ -1313,11 +1507,23 @@ mod tests {
         let mut app = app();
         let screen = render(&mut app);
         println!("{screen}");
-        assert!(screen.contains("week 43"));
-        assert!(screen.contains("13:00-17:00"));
+        assert!(screen.contains("Week 43"));
+        assert!(screen.contains("13:00–17:00"));
         app.open_editor(None);
         let screen = render(&mut app);
         println!("{screen}");
         assert!(screen.contains("New block"));
+    }
+
+    #[test]
+    fn renders_in_a_small_terminal() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        println!("{}", render_buf(&terminal));
+        app.mode = Mode::Help;
+        terminal.draw(|f| app.draw(f)).unwrap();
+        app.mode = Mode::Confirm;
+        terminal.draw(|f| app.draw(f)).unwrap();
     }
 }
