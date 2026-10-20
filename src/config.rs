@@ -77,7 +77,7 @@ pub struct Config {
 }
 
 pub fn default_model() -> String {
-    "claude-opus-5-5".into()
+    "claude-haiku-5-5".into()
 }
 
 /// Expands a bare family name ("haiku") to a full Claude model id.

@@ -307,7 +307,7 @@ mod tests {
     fn claude_body_uses_structured_output() {
         let body = claude_body(&cfg(), "normal day today", today());
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-        assert_eq!(body["model"], "claude-opus-5-5");
+        assert_eq!(body["model"], "claude-haiku-5-5");
     }
 
     #[test]
