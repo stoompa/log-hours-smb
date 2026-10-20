@@ -12,7 +12,43 @@ cargo install --git https://github.com/stoompa/log-hours-smb
 ```
 
 Run the same command with `--force` to update. Google Chrome and the 1Password CLI
-(`op`) must be installed separately.
+(`op`) must be installed separately (see below).
+
+## Prerequisites
+
+### Google Chrome
+
+Install [Google Chrome](https://www.google.com/chrome/) (or `brew install --cask google-chrome`).
+It's found automatically in its standard location; otherwise point `CHROME` at the binary:
+
+```
+export CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
+
+Each run uses a throwaway profile, so your normal Chrome profile and logins are untouched.
+
+### 1Password CLI
+
+1. Install the 1Password desktop app and the CLI:
+   ```
+   brew install --cask 1password 1password-cli
+   ```
+2. In the desktop app, open **Settings → Developer** and enable
+   **Integrate with 1Password CLI**. (Turning on Touch ID / Apple Watch unlock under
+   **Settings → Security** lets you approve CLI access with a fingerprint.)
+3. Check it works — this should prompt for approval, then list your vaults:
+   ```
+   op vault list
+   ```
+4. Make sure your SMB login item has a **username**, **password** and a
+   **one-time password** field (add the 2FA TOTP via *Edit → + → One-Time Password*,
+   scanning the QR code SMB shows when setting up Google Authenticator). Verify with:
+   ```
+   op item get "<item name>" --otp
+   ```
+
+Then run `automate-smb setup` and enter that item's name (and vault, if the name
+isn't unique).
 
 ```
 automate-smb setup             # company tag, 1Password item, API key reference
@@ -25,8 +61,7 @@ In the TUI, move with ←/→ (days) and [ ] (weeks); weeks load from SMB as you
 `a` opens a time picker, `n` stages your normal day, `w` fills empty weekdays,
 `/` lets Claude turn a phrase into blocks, and `s` reviews and submits new blocks.
 
-Add `--headed` to watch the browser. Needs Google Chrome and the 1Password CLI (`op`)
-with desktop-app integration.
+Add `--headed` to watch the browser.
 
 ## AI provider
 
