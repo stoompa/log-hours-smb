@@ -4,6 +4,9 @@ Terminal app for logging working hours in SMB HR from a plain-English phrase.
 
 ## Install
 
+The instructions below assume macOS (Homebrew, zsh); on Linux, install Chrome and the
+1Password CLI with your package manager and use your own shell profile.
+
 Needs [Rust](https://rustup.rs). Installs the `log-hours-smb` binary into `~/.cargo/bin`:
 
 ```
@@ -52,25 +55,63 @@ Each run uses a throwaway profile, so your normal Chrome profile and logins are 
    op item get "<item name>" --otp
    ```
 
-Then run `log-hours-smb setup` and enter that item's name (and vault, if the name
-isn't unique).
+### AI API key
+
+Save your Anthropic, OpenRouter or OpenAI key in 1Password, right-click the field and
+choose **Copy Secret Reference**. Setup asks for that `op://…` reference, not the key
+itself, and rejects anything else. Alternatively leave it blank and export the
+provider's env var (see [AI provider](#ai-provider)). A local server such as Ollama
+needs no key.
+
+## Setup
+
+Run `log-hours-smb setup` (it also runs automatically the first time you start the
+app). It walks through four steps:
+
+1. **SMB login**: your company tag and the 1Password item name (and vault, if the
+   name isn't unique).
+2. **Normal working day**: blocks like `8-1230 1300-1700`, used by `n`, `w` and the
+   phrase "normal day".
+3. **AI provider**: provider, model and API key reference.
+4. **Check**: reads your 1Password item and sends a test phrase to the AI.
+
+Run it again any time to change a setting; Enter keeps the current value.
+
+## Usage
 
 ```
-log-hours-smb setup             # company tag, 1Password item, API key reference
 log-hours-smb                   # week-calendar TUI (press ? for keys)
+log-hours-smb setup             # change settings (see above)
 log-hours-smb parse <phrase>    # show how the AI reads a phrase (no SMB access)
 log-hours-smb week [YYYY-MM-DD] # print entries already logged that week (read-only)
 ```
 
 In the TUI, move with ←/→ (days) and [ ] (weeks); weeks load from SMB as you go.
 `a` opens a time picker, `n` stages your normal day, `w` fills empty weekdays,
-`/` lets Claude turn a phrase into blocks, and `s` reviews and submits new blocks.
+`/` lets the AI turn a phrase into blocks, and `s` reviews and submits new blocks.
+Press `?` for the rest (edit, delete, copy/paste a day, reload…).
+
+Submitting only adds blocks that are new and don't overlap anything already in SMB;
+it never edits or deletes existing entries.
 
 Add `--headed` to watch the browser.
 
-## AI provider
+## Configuration
 
-Set in `~/.config/log-hours-smb/config.toml` (or via `setup`):
+Settings live in `~/.config/log-hours-smb/config.toml` (override the path with
+`LOG_HOURS_SMB_CONFIG`). No passwords or keys are stored there.
+
+```toml
+company_tag = "acme"
+op_item = "SMB HR"
+op_vault = "Private"                  # optional
+provider = "claude"
+model = "claude-haiku-5-5"
+api_key_ref = "op://Private/Anthropic/credential"
+default_day = ["08:00-12:30", "13:00-17:00"]
+```
+
+### AI provider
 
 | `provider`   | API                      | key from                                   |
 |--------------|--------------------------|--------------------------------------------|
@@ -78,15 +119,19 @@ Set in `~/.config/log-hours-smb/config.toml` (or via `setup`):
 | `openrouter` | openrouter.ai            | `OPENROUTER_API_KEY` or `api_key_ref`      |
 | `openai`     | OpenAI or any compatible server via `base_url` | `OPENAI_API_KEY`, `api_key_ref`, or none for a local `base_url` |
 
+If the env var is set it wins over `api_key_ref`. For `claude` the model defaults to
+`claude-haiku-5-5`; setup also accepts `haiku`, `sonnet`, `opus` or `fable`.
+
+For a local server, point `base_url` at it:
+
 ```toml
 provider = "openai"
 model = "qwen3:8b"
-base_url = "http://localhost:11434/v1"   # Ollama
+base_url = "http://localhost:11434/v1"   # Ollama; LM Studio is http://localhost:1234/v1
 ```
 
-`api_key_ref` is an `op://` reference read with 1Password. Replies are constrained
-to a JSON schema; servers that reject `response_format` are retried with the schema
-in the prompt.
+Replies are constrained to a JSON schema; servers that reject `response_format` are
+retried with the schema in the prompt.
 
 Login and timesheet details: [docs/smb-notes.md](docs/smb-notes.md).
 
