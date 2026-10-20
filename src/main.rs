@@ -12,7 +12,7 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate};
 use clap::{Parser, Subcommand};
 
-use config::Config;
+use config::{Config, Provider};
 
 #[derive(Parser)]
 #[command(about = "Log SMB HR working hours from a plain-English phrase")]
@@ -30,7 +30,7 @@ enum Command {
     Setup,
     /// Log in to SMB and print the entries logged in the given week (read-only).
     Week { date: Option<NaiveDate> },
-    /// Show how Claude reads a phrase, without touching SMB.
+    /// Show how the AI reads a phrase, without touching SMB.
     Parse { phrase: Vec<String> },
 }
 
@@ -39,8 +39,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         None => {
+            if !Config::path()?.exists() {
+                println!("First run — let's set things up.\n");
+                setup().await?;
+                println!();
+            }
             let cfg = Config::load()?;
-            let key = secrets::anthropic_key(&cfg).await?;
+            let key = secrets::api_key(&cfg).await?;
             tui::run(cfg, key, cli.headed).await
         }
         Some(Command::Setup) => setup().await,
@@ -61,9 +66,14 @@ async fn main() -> Result<()> {
         }
         Some(Command::Parse { phrase }) => {
             let cfg = Config::load()?;
-            let key = secrets::anthropic_key(&cfg).await?;
-            let parsed =
-                ai::parse(&cfg, &key, &phrase.join(" "), Local::now().date_naive()).await?;
+            let key = secrets::api_key(&cfg).await?;
+            let parsed = ai::parse(
+                &cfg,
+                key.as_deref(),
+                &phrase.join(" "),
+                Local::now().date_naive(),
+            )
+            .await?;
             println!("{}", parsed.summary);
             for entry in parsed.entries {
                 println!("{}", entry.to_line());
@@ -103,22 +113,24 @@ async fn setup() -> Result<()> {
         "1Password vault (blank = search all)",
         existing.as_ref().and_then(|c| c.op_vault.as_deref()),
     )?;
-    let key_ref = ask(
-        "op:// reference for the Anthropic API key (blank = use ANTHROPIC_API_KEY)",
-        existing
-            .as_ref()
-            .and_then(|c| c.anthropic_key_ref.as_deref()),
-    )?;
-    let mut cfg = Config::new(
-        company,
-        item,
-        (!vault.is_empty()).then_some(vault),
-        (!key_ref.is_empty()).then_some(key_ref),
-    );
-    if let Some(old) = existing {
-        cfg.model = old.model;
-        cfg.default_day = old.default_day;
-    }
+    let current_day = existing
+        .as_ref()
+        .map(|c| c.default_day.join(" "))
+        .unwrap_or_else(|| "8-1230 1300-1700".into());
+    let default_day = loop {
+        let answer = ask(
+            "Normal working day, as blocks with breaks between them (e.g. 8-1230 1300-1700)",
+            Some(&current_day),
+        )?;
+        match model::parse_day_blocks(&answer) {
+            Ok(blocks) => break blocks,
+            Err(e) => println!("  {e}"),
+        }
+    };
+    println!("  normal day: {}", default_day.join(", "));
+    let mut cfg = Config::new(company, item, (!vault.is_empty()).then_some(vault));
+    cfg.default_day = default_day;
+    setup_llm(&mut cfg, existing.as_ref())?;
     let path = cfg.save()?;
     println!("saved {}", path.display());
 
@@ -131,9 +143,76 @@ async fn setup() -> Result<()> {
         creds.username,
         otp.len()
     );
-    match secrets::anthropic_key(&cfg).await {
-        Ok(_) => println!("Anthropic API key: ok"),
-        Err(e) => println!("Anthropic API key: {e:#}"),
+    print!("checking {}… ", cfg.provider.label());
+    std::io::stdout().flush()?;
+    let key = secrets::api_key(&cfg).await?;
+    let parsed = ai::parse(
+        &cfg,
+        key.as_deref(),
+        "normal day today",
+        Local::now().date_naive(),
+    )
+    .await?;
+    println!("ok — \"normal day today\" → {}", parsed.summary);
+    Ok(())
+}
+
+fn setup_llm(cfg: &mut Config, existing: Option<&Config>) -> Result<()> {
+    let current = existing.map(|c| c.provider).unwrap_or_default();
+    let provider = loop {
+        let answer = ask(
+            "AI provider: claude, openrouter, or openai (any OpenAI-compatible server, e.g. Ollama)",
+            Some(&format!("{current:?}").to_lowercase()),
+        )?;
+        match Provider::parse(&answer) {
+            Some(p) => break p,
+            None => println!("  pick claude, openrouter or openai"),
+        }
+    };
+    let same = existing.filter(|c| c.provider == provider);
+
+    if provider == Provider::OpenAI {
+        let url = ask(
+            "Base URL (Ollama: http://localhost:11434/v1, LM Studio: http://localhost:1234/v1)",
+            Some(
+                same.map(|c| c.base_url())
+                    .unwrap_or(provider.default_base_url()),
+            ),
+        )?;
+        cfg.base_url = (url.trim_end_matches('/') != provider.default_base_url()).then_some(url);
     }
+
+    let model_default = match (same, provider) {
+        (Some(c), _) => Some(c.model.clone()),
+        (None, Provider::Claude) => Some(config::default_model()),
+        (None, _) => None,
+    };
+    let hint = match provider {
+        Provider::Claude => "Model",
+        Provider::OpenRouter => "Model id as listed on openrouter.ai/models",
+        Provider::OpenAI => "Model name (for Ollama, one from `ollama list`)",
+    };
+    cfg.model = loop {
+        let model = ask(hint, model_default.as_deref())?;
+        if !model.is_empty() {
+            break model;
+        }
+    };
+
+    let local = provider == Provider::OpenAI && cfg.base_url.is_some();
+    let key_ref = ask(
+        &format!(
+            "op:// reference for the API key (blank = use {}{})",
+            provider.key_env(),
+            if local {
+                ", or none for a local server"
+            } else {
+                ""
+            }
+        ),
+        same.and_then(|c| c.api_key_ref.as_deref()),
+    )?;
+    cfg.provider = provider;
+    cfg.api_key_ref = (!key_ref.is_empty()).then_some(key_ref);
     Ok(())
 }

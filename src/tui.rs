@@ -121,7 +121,7 @@ impl Kind {
 
 struct App {
     cfg: Config,
-    api_key: String,
+    api_key: Option<String>,
     tx: mpsc::UnboundedSender<Msg>,
     cmds: mpsc::UnboundedSender<Cmd>,
     mode: Mode,
@@ -141,7 +141,7 @@ struct App {
     quit: bool,
 }
 
-pub async fn run(cfg: Config, api_key: String, headed: bool) -> Result<()> {
+pub async fn run(cfg: Config, api_key: Option<String>, headed: bool) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Event>();
@@ -604,7 +604,7 @@ impl App {
                     self.today,
                 );
                 tokio::spawn(async move {
-                    let result = ai::parse(&cfg, &api_key, &input, today)
+                    let result = ai::parse(&cfg, api_key.as_deref(), &input, today)
                         .await
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Msg::Parsed(result));
@@ -771,10 +771,10 @@ impl App {
         let hint = match (&self.flash, &self.mode) {
             (Some(msg), _) => Line::from(format!(" {msg}")).yellow(),
             (None, Mode::Normal) => Line::from(
-                " ←→ day  [ ] week  t today  ↑↓ block  a add  e edit  d delete  n normal day  w fill week  y/p copy/paste  / ask Claude  s submit  ? help",
+                " ←→ day  [ ] week  t today  ↑↓ block  a add  e edit  d delete  n normal day  w fill week  y/p copy/paste  / ask AI  s submit  ? help",
             )
             .dim(),
-            (None, Mode::Phrase(_)) => Line::from(" Enter send to Claude  Esc cancel").dim(),
+            (None, Mode::Phrase(_)) => Line::from(" Enter send  Esc cancel").dim(),
             (None, Mode::Editor(_)) => Line::from(
                 " Tab/←→ field  ↑↓ ±15 min (⇧ ±1 h)  type 0830  Enter save  Esc cancel",
             )
@@ -1037,16 +1037,17 @@ impl App {
     }
 
     fn draw_ask(&self, f: &mut Frame, area: Rect) {
+        let ai = format!(" {} ", self.cfg.provider.label());
         let (text, style, title) = match &self.mode {
             Mode::Phrase(input) => (
                 format!("{input}▏"),
                 Style::new(),
-                " Ask Claude — e.g. \"normal week but Friday off\" ",
+                " Describe your hours — e.g. \"normal week but Friday off\" ",
             ),
             Mode::Parsing => (
                 format!("{} thinking…", self.spinner()),
                 Style::new().dim(),
-                " Claude ",
+                ai.as_str(),
             ),
             Mode::Submitting => (
                 format!("{} submitting to SMB…", self.spinner()),
@@ -1054,12 +1055,12 @@ impl App {
                 " SMB ",
             ),
             _ if !self.summary.is_empty() => {
-                (self.summary.clone(), Style::new().italic(), " Claude ")
+                (self.summary.clone(), Style::new().italic(), ai.as_str())
             }
             _ => (
                 "press / to describe your hours in plain English".into(),
                 Style::new().dim(),
-                " Claude ",
+                ai.as_str(),
             ),
         };
         let border = if matches!(self.mode, Mode::Phrase(_)) {
@@ -1193,7 +1194,7 @@ fn draw_help(f: &mut Frame) {
         ("n", "stage your normal day on this day"),
         ("w", "stage your normal day on every empty weekday"),
         ("y / p", "copy this day's blocks / paste onto this day"),
-        ("/  i", "describe hours in plain English (Claude)"),
+        ("/  i", "describe hours in plain English (AI)"),
         ("s", "review and submit new blocks to SMB"),
         ("r", "reload this week from SMB (or retry login)"),
         ("q / Esc", "quit"),
@@ -1258,8 +1259,8 @@ mod tests {
             },
         ];
         let mut app = App {
-            cfg: Config::new("acme".into(), "SMB".into(), None, None),
-            api_key: String::new(),
+            cfg: Config::new("acme".into(), "SMB".into(), None),
+            api_key: None,
             tx,
             cmds,
             mode: Mode::Normal,

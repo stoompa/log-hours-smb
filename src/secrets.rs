@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::config::Config;
+use crate::config::{Config, Provider};
 
 pub struct Credentials {
     pub username: String,
@@ -71,15 +71,19 @@ pub async fn otp(cfg: &Config) -> Result<String> {
     op(&item_args(cfg, &["--otp"])).await
 }
 
-pub async fn anthropic_key(cfg: &Config) -> Result<String> {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+/// The API key for the configured provider: its env var, else `api_key_ref`
+/// from 1Password. A custom OpenAI-compatible `base_url` (a local server) may
+/// need no key at all.
+pub async fn api_key(cfg: &Config) -> Result<Option<String>> {
+    let env = cfg.provider.key_env();
+    if let Ok(key) = std::env::var(env)
         && !key.is_empty()
     {
-        return Ok(key);
+        return Ok(Some(key));
     }
-    let reference = cfg
-        .anthropic_key_ref
-        .as_deref()
-        .context("set ANTHROPIC_API_KEY or `anthropic_key_ref` in the config")?;
-    op(&["read", reference]).await
+    match cfg.api_key_ref.as_deref() {
+        Some(reference) => Ok(Some(op(&["read", reference]).await?)),
+        None if cfg.provider == Provider::OpenAI && cfg.base_url.is_some() => Ok(None),
+        None => bail!("set {env} or `api_key_ref` in the config"),
+    }
 }
