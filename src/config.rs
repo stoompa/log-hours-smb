@@ -86,18 +86,24 @@ fn default_day() -> Vec<String> {
 
 impl Config {
     pub fn path() -> Result<PathBuf> {
-        if let Some(path) = std::env::var_os("AUTOMATE_SMB_CONFIG") {
+        if let Some(path) = std::env::var_os("LOG_HOURS_SMB_CONFIG") {
             return Ok(PathBuf::from(path));
         }
-        let home = dirs::home_dir().context("no home directory")?;
-        Ok(home.join(".config/automate-smb/config.toml"))
+        let config = dirs::home_dir().context("no home directory")?.join(".config");
+        let dir = config.join("log-hours-smb");
+        // Carry over the config from before the rename from log-hours-smb.
+        let old = config.join("log-hours-smb");
+        if !dir.exists() && old.exists() {
+            std::fs::rename(&old, &dir)?;
+        }
+        Ok(dir.join("config.toml"))
     }
 
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         let text = std::fs::read_to_string(&path).with_context(|| {
             format!(
-                "no config at {} — run `automate-smb setup` first",
+                "no config at {} — run `log-hours-smb setup` first",
                 path.display()
             )
         })?;

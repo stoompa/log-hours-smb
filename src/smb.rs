@@ -42,7 +42,7 @@ struct RawEvent {
 
 impl Smb {
     pub async fn launch(headed: bool) -> Result<Self> {
-        let profile = std::env::temp_dir().join(format!("automate-smb-{}", std::process::id()));
+        let profile = std::env::temp_dir().join(format!("log-hours-smb-{}", std::process::id()));
         std::fs::create_dir_all(&profile)?;
         std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))?;
         let mut builder = BrowserConfig::builder()

@@ -26,7 +26,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write ~/.config/automate-smb/config.toml and check 1Password access.
+    /// Write ~/.config/log-hours-smb/config.toml and check 1Password access.
     Setup,
     /// Log in to SMB and print the entries logged in the given week (read-only).
     Week { date: Option<NaiveDate> },

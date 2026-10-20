@@ -239,7 +239,7 @@ async fn openai(
             req = req.bearer_auth(key);
         }
         if cfg.provider == Provider::OpenRouter {
-            req = req.header("X-Title", "automate-smb");
+            req = req.header("X-Title", "log-hours-smb");
         }
         let resp = req
             .send()

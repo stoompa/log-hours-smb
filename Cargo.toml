@@ -1,5 +1,5 @@
 [package]
-name = "automate-smb"
+name = "log-hours-smb"
 version = "0.1.0"
 edition = "2024"
 

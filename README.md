@@ -1,11 +1,10 @@
-# automate-smb
+# log-hours-smb
 
 Terminal app for logging working hours in SMB HR from a plain-English phrase.
 
 ## Install
 
-Needs [Rust](https://rustup.rs). Installs the `automate-smb` binary into `~/.cargo/bin`
-(make sure it's on your `PATH`):
+Needs [Rust](https://rustup.rs). Installs the `log-hours-smb` binary into `~/.cargo/bin`:
 
 ```
 cargo install --git https://github.com/stoompa/log-hours-smb
@@ -13,6 +12,12 @@ cargo install --git https://github.com/stoompa/log-hours-smb
 
 Run the same command with `--force` to update. Google Chrome and the 1Password CLI
 (`op`) must be installed separately (see below).
+
+If you then get `command not found: log-hours-smb`, `~/.cargo/bin` isn't on your `PATH`:
+
+```
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
 
 ## Prerequisites
 
@@ -47,14 +52,14 @@ Each run uses a throwaway profile, so your normal Chrome profile and logins are 
    op item get "<item name>" --otp
    ```
 
-Then run `automate-smb setup` and enter that item's name (and vault, if the name
+Then run `log-hours-smb setup` and enter that item's name (and vault, if the name
 isn't unique).
 
 ```
-automate-smb setup             # company tag, 1Password item, API key reference
-automate-smb                   # week-calendar TUI (press ? for keys)
-automate-smb parse <phrase>    # show how the AI reads a phrase (no SMB access)
-automate-smb week [YYYY-MM-DD] # print entries already logged that week (read-only)
+log-hours-smb setup             # company tag, 1Password item, API key reference
+log-hours-smb                   # week-calendar TUI (press ? for keys)
+log-hours-smb parse <phrase>    # show how the AI reads a phrase (no SMB access)
+log-hours-smb week [YYYY-MM-DD] # print entries already logged that week (read-only)
 ```
 
 In the TUI, move with ←/→ (days) and [ ] (weeks); weeks load from SMB as you go.
@@ -65,7 +70,7 @@ Add `--headed` to watch the browser.
 
 ## AI provider
 
-Set in `~/.config/automate-smb/config.toml` (or via `setup`):
+Set in `~/.config/log-hours-smb/config.toml` (or via `setup`):
 
 | `provider`   | API                      | key from                                   |
 |--------------|--------------------------|--------------------------------------------|
