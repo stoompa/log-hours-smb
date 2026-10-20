@@ -188,30 +188,43 @@ fn setup_llm(cfg: &mut Config, existing: Option<&Config>) -> Result<()> {
         (None, _) => None,
     };
     let hint = match provider {
-        Provider::Claude => "Model",
+        Provider::Claude => "Model (opus, sonnet, haiku, fable or a full id)",
         Provider::OpenRouter => "Model id as listed on openrouter.ai/models",
         Provider::OpenAI => "Model name (for Ollama, one from `ollama list`)",
     };
     cfg.model = loop {
         let model = ask(hint, model_default.as_deref())?;
         if !model.is_empty() {
-            break model;
+            break match provider {
+                Provider::Claude => config::claude_model(&model),
+                _ => model,
+            };
         }
     };
 
     let local = provider == Provider::OpenAI && cfg.base_url.is_some();
-    let key_ref = ask(
-        &format!(
-            "op:// reference for the API key (blank = use {}{})",
-            provider.key_env(),
-            if local {
-                ", or none for a local server"
-            } else {
-                ""
-            }
-        ),
-        same.and_then(|c| c.api_key_ref.as_deref()),
-    )?;
+    let env_set = std::env::var(provider.key_env()).is_ok_and(|k| !k.is_empty());
+    let key_ref = loop {
+        let key_ref = ask(
+            &format!(
+                "op:// reference for the API key (blank = use {}{})",
+                provider.key_env(),
+                if local {
+                    ", or none for a local server"
+                } else {
+                    ""
+                }
+            ),
+            same.and_then(|c| c.api_key_ref.as_deref()),
+        )?;
+        if !key_ref.is_empty() || env_set || local {
+            break key_ref;
+        }
+        println!(
+            "  {} isn't set — enter an op:// reference (1Password: item → field → Copy Secret Reference)",
+            provider.key_env()
+        );
+    };
     cfg.provider = provider;
     cfg.api_key_ref = (!key_ref.is_empty()).then_some(key_ref);
     Ok(())

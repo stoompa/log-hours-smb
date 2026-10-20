@@ -80,6 +80,17 @@ pub fn default_model() -> String {
     "claude-opus-5-5".into()
 }
 
+/// Expands a bare family name ("haiku") to a full Claude model id.
+pub fn claude_model(name: &str) -> String {
+    match name.trim().to_lowercase().as_str() {
+        "opus" => "claude-opus-5-5".into(),
+        "sonnet" => "claude-sonnet-5-5".into(),
+        "haiku" => "claude-haiku-5-5".into(),
+        "fable" => "claude-fable-5-1".into(),
+        _ => name.trim().to_string(),
+    }
+}
+
 fn default_day() -> Vec<String> {
     vec!["08:00-12:30".into(), "13:00-17:00".into()]
 }
@@ -91,8 +102,8 @@ impl Config {
         }
         let config = dirs::home_dir().context("no home directory")?.join(".config");
         let dir = config.join("log-hours-smb");
-        // Carry over the config from before the rename from log-hours-smb.
-        let old = config.join("log-hours-smb");
+        // Carry over the config from before the rename from automate-smb.
+        let old = config.join("automate-smb");
         if !dir.exists() && old.exists() {
             std::fs::rename(&old, &dir)?;
         }
