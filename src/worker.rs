@@ -4,22 +4,23 @@ use chrono::NaiveDate;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
-use crate::model::{Entry, Status, classify, week_start};
+use crate::model::Entry;
 use crate::smb::Smb;
 
 pub enum Cmd {
-    /// Compare entries with what SMB already holds.
-    Check(Vec<Entry>),
-    /// Add these entries; `usize` is the preview row each one came from.
-    Submit(Vec<(usize, Entry)>),
+    /// Read the logged entries of the week starting on this Monday.
+    LoadWeek(NaiveDate),
+    Submit(Vec<Entry>),
 }
 
 pub enum Event {
     Log(String),
     Ready,
     LoginFailed(String),
-    Statuses(Vec<Status>),
-    Submitted(Vec<(usize, Status)>),
+    Week(NaiveDate, Vec<Entry>),
+    WeekFailed(NaiveDate, String),
+    /// Outcome per submitted entry; `None` means it was saved.
+    Submitted(Vec<(Entry, Option<String>)>),
 }
 
 pub async fn run(
@@ -28,44 +29,52 @@ pub async fn run(
     mut cmds: UnboundedReceiver<Cmd>,
     events: UnboundedSender<Event>,
 ) {
-    let log = |msg: String| {
-        let _ = events.send(Event::Log(msg));
+    let send = |ev: Event| {
+        let _ = events.send(ev);
     };
-    let mut smb: Option<Smb> = None;
-    connect(&cfg, headed, &mut smb, &events, &log).await;
+    let log = |msg: String| send(Event::Log(msg));
+    let mut smb = connect(&cfg, headed, &send, &log).await;
 
     while let Some(cmd) = cmds.recv().await {
         if smb.is_none() {
-            connect(&cfg, headed, &mut smb, &events, &log).await;
+            smb = connect(&cfg, headed, &send, &log).await;
         }
         let Some(session) = smb.as_ref() else {
+            if let Cmd::LoadWeek(monday) = cmd {
+                send(Event::WeekFailed(monday, "not logged in".into()));
+            }
             continue;
         };
         match cmd {
-            Cmd::Check(entries) => match check(session, &entries).await {
-                Ok(statuses) => {
-                    let _ = events.send(Event::Statuses(statuses));
-                }
-                Err(e) => log(format!("could not read timesheet: {e:#}")),
+            Cmd::LoadWeek(monday) => match session.week(monday).await {
+                Ok(entries) => send(Event::Week(monday, entries)),
+                Err(e) => send(Event::WeekFailed(monday, format!("{e:#}"))),
             },
-            Cmd::Submit(rows) => {
-                let entries: Vec<Entry> = rows.iter().map(|(_, e)| e.clone()).collect();
-                let statuses = match session.add_all(&entries, &log).await {
-                    Ok(results) => results
+            Cmd::Submit(entries) => match session.add_all(&entries, &log).await {
+                Ok((results, weeks)) => {
+                    let ok = results.iter().filter(|r| r.is_ok()).count();
+                    log(format!("saved {ok}/{} blocks", entries.len()));
+                    for (monday, logged) in weeks {
+                        send(Event::Week(monday, logged));
+                    }
+                    let outcome = entries
                         .into_iter()
-                        .map(|r| match r {
-                            Ok(()) => Status::Added,
-                            Err(e) => Status::Failed(format!("{e:#}")),
-                        })
-                        .collect(),
-                    Err(e) => vec![Status::Failed(format!("{e:#}")); entries.len()],
-                };
-                let added = statuses.iter().filter(|s| **s == Status::Added).count();
-                log(format!("done: {added}/{} added", entries.len()));
-                let _ = events.send(Event::Submitted(
-                    rows.into_iter().map(|(i, _)| i).zip(statuses).collect(),
-                ));
-            }
+                        .zip(results)
+                        .map(|(e, r)| (e, r.err().map(|err| format!("{err:#}"))))
+                        .collect();
+                    send(Event::Submitted(outcome));
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    log(format!("submit failed: {msg}"));
+                    send(Event::Submitted(
+                        entries
+                            .into_iter()
+                            .map(|e| (e, Some(msg.clone())))
+                            .collect(),
+                    ));
+                }
+            },
         }
     }
     if let Some(session) = smb {
@@ -76,10 +85,9 @@ pub async fn run(
 async fn connect(
     cfg: &Config,
     headed: bool,
-    smb: &mut Option<Smb>,
-    events: &UnboundedSender<Event>,
+    send: &impl Fn(Event),
     log: &impl Fn(String),
-) {
+) -> Option<Smb> {
     let result = async {
         let session = Smb::launch(headed).await?;
         if let Err(e) = session.login(cfg, log).await {
@@ -91,25 +99,12 @@ async fn connect(
     .await;
     match result {
         Ok(session) => {
-            *smb = Some(session);
-            let _ = events.send(Event::Ready);
+            send(Event::Ready);
+            Some(session)
         }
         Err(e) => {
-            let _ = events.send(Event::LoginFailed(format!("{e:#}")));
+            send(Event::LoginFailed(format!("{e:#}")));
+            None
         }
     }
-}
-
-async fn check(session: &Smb, entries: &[Entry]) -> anyhow::Result<Vec<Status>> {
-    let mut weeks: Vec<(NaiveDate, Vec<Entry>)> = Vec::new();
-    let mut statuses = Vec::new();
-    for entry in entries {
-        let monday = week_start(entry.date);
-        if !weeks.iter().any(|(m, _)| *m == monday) {
-            weeks.push((monday, session.week(monday).await?));
-        }
-        let existing = &weeks.iter().find(|(m, _)| *m == monday).unwrap().1;
-        statuses.push(classify(entry, existing));
-    }
-    Ok(statuses)
 }

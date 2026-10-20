@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use chrono::{Datelike, NaiveDate, NaiveTime};
+use chrono::{Datelike, NaiveDate, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 
 /// One working-time block as SMB stores it: a date plus start/end. A day with
@@ -33,7 +33,8 @@ impl Entry {
         self.date == other.date && self.start < other.end && other.start < self.end
     }
 
-    /// Parses `YYYY-MM-DD HH:MM-HH:MM`, the format used by the preview editor.
+    /// Parses `YYYY-MM-DD HH:MM-HH:MM`.
+    #[cfg(test)]
     pub fn parse_line(line: &str) -> Result<Self> {
         let (date, times) = line
             .trim()
@@ -66,6 +67,12 @@ pub fn week_start(date: NaiveDate) -> NaiveDate {
     date - chrono::Duration::days(date.weekday().num_days_from_monday() as i64)
 }
 
+/// Minutes-of-day helpers for the time picker.
+pub fn shift_time(t: NaiveTime, minutes: i64) -> NaiveTime {
+    let total = (t.hour() as i64 * 60 + t.minute() as i64 + minutes).clamp(0, 23 * 60 + 45);
+    NaiveTime::from_hms_opt((total / 60) as u32, (total % 60) as u32, 0).unwrap()
+}
+
 pub fn parse_time(s: &str) -> Result<NaiveTime> {
     NaiveTime::parse_from_str(s.trim(), "%H:%M").with_context(|| format!("bad time `{s}`"))
 }
@@ -77,25 +84,9 @@ pub fn fmt_time(t: NaiveTime) -> String {
 /// How a proposed entry relates to what is already in SMB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    Unknown,
     New,
     Exists,
     Conflict(String),
-    Added,
-    Failed(String),
-}
-
-impl Status {
-    pub fn label(&self) -> String {
-        match self {
-            Status::Unknown => "checking…".into(),
-            Status::New => "new".into(),
-            Status::Exists => "already logged".into(),
-            Status::Conflict(c) => format!("overlaps {c}"),
-            Status::Added => "added ✓".into(),
-            Status::Failed(e) => format!("failed: {e}"),
-        }
-    }
 }
 
 /// Compares a proposed entry with the entries SMB already holds for that week.

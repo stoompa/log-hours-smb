@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
+
+use crate::model::parse_time;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -50,6 +53,17 @@ impl Config {
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(&path, toml::to_string_pretty(self)?)?;
         Ok(path)
+    }
+
+    /// The configured normal day as (start, end) pairs; malformed blocks are skipped.
+    pub fn default_blocks(&self) -> Vec<(NaiveTime, NaiveTime)> {
+        self.default_day
+            .iter()
+            .filter_map(|b| {
+                let (s, e) = b.split_once('-')?;
+                Some((parse_time(s).ok()?, parse_time(e).ok()?))
+            })
+            .collect()
     }
 
     pub fn new(

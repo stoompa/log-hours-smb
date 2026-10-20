@@ -270,13 +270,13 @@ impl Smb {
         Ok(())
     }
 
-    /// Adds entries that are not yet in SMB, then reloads and checks each one.
-    /// Returns one result per entry, in order.
+    /// Adds entries, then reloads every affected week and checks each entry
+    /// landed. Returns one result per entry plus the freshly read weeks.
     pub async fn add_all(
         &self,
         entries: &[Entry],
         log: &impl Fn(String),
-    ) -> Result<Vec<Result<()>>> {
+    ) -> Result<(Vec<Result<()>>, Vec<(NaiveDate, Vec<Entry>)>)> {
         let mut results = Vec::new();
         for entry in entries {
             log(format!("adding {}", entry.to_line()));
@@ -285,16 +285,19 @@ impl Smb {
         log("verifying…".into());
         self.open_timesheet().await?;
         let mut weeks: Vec<(NaiveDate, Vec<Entry>)> = Vec::new();
-        for (entry, result) in entries.iter().zip(results.iter_mut()) {
-            if result.is_err() {
-                continue;
-            }
+        for entry in entries {
             let monday = week_start(entry.date);
             if !weeks.iter().any(|(m, _)| *m == monday) {
                 weeks.push((monday, self.week(monday).await?));
             }
-            let logged = &weeks.iter().find(|(m, _)| *m == monday).unwrap().1;
-            if !logged.contains(entry) {
+        }
+        for (entry, result) in entries.iter().zip(results.iter_mut()) {
+            let logged = &weeks
+                .iter()
+                .find(|(m, _)| *m == week_start(entry.date))
+                .unwrap()
+                .1;
+            if result.is_ok() && !logged.contains(entry) {
                 let msg = self.page_message().await;
                 *result = Err(anyhow::anyhow!(if msg.is_empty() {
                     "not found after saving".to_string()
@@ -303,6 +306,6 @@ impl Smb {
                 }));
             }
         }
-        Ok(results)
+        Ok((results, weeks))
     }
 }
