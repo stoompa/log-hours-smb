@@ -3,6 +3,8 @@
 //! the modal we set the Telerik controls through their client API and click
 //! the hidden "Add Entry" button, which fires the same async postback.
 
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -27,6 +29,8 @@ pub struct Smb {
     browser: Browser,
     handler: JoinHandle<()>,
     page: Page,
+    /// Throwaway Chrome profile, so SMB cookies don't outlive the session.
+    profile: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -38,7 +42,11 @@ struct RawEvent {
 
 impl Smb {
     pub async fn launch(headed: bool) -> Result<Self> {
+        let profile = std::env::temp_dir().join(format!("automate-smb-{}", std::process::id()));
+        std::fs::create_dir_all(&profile)?;
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))?;
         let mut builder = BrowserConfig::builder()
+            .user_data_dir(&profile)
             .window_size(1400, 1000)
             .request_timeout(Duration::from_secs(90));
         if headed {
@@ -53,6 +61,7 @@ impl Smb {
             browser,
             handler,
             page,
+            profile,
         })
     }
 
@@ -60,6 +69,7 @@ impl Smb {
         let _ = self.browser.close().await;
         let _ = self.browser.wait().await;
         self.handler.abort();
+        let _ = std::fs::remove_dir_all(&self.profile);
     }
 
     async fn eval<T: serde::de::DeserializeOwned>(&self, js: impl Into<String>) -> Result<T> {
@@ -93,13 +103,18 @@ impl Smb {
         Ok(())
     }
 
+    /// The script embeds `value` (which may be a password), so failures are
+    /// reported without the underlying error, which could echo the script.
     async fn set_value(&self, id: &str, value: &str) -> Result<()> {
         let js = format!(
             "document.getElementById({}).value = {}; true",
             json!(id),
             json!(value)
         );
-        self.eval::<bool>(js).await.map(|_| ())
+        match self.eval::<bool>(js).await {
+            Ok(_) => Ok(()),
+            Err(_) => bail!("could not fill the `{id}` field"),
+        }
     }
 
     async fn submit(&self, id: &str) -> Result<()> {

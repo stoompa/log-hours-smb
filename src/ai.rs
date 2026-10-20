@@ -224,6 +224,11 @@ async fn openai(
     today: NaiveDate,
 ) -> Result<Parsed> {
     let url = format!("{}/chat/completions", cfg.base_url().trim_end_matches('/'));
+    if api_key.is_some() && !secure_endpoint(&url) {
+        bail!(
+            "refusing to send an API key over plain http to {url}; use https or a localhost address"
+        );
+    }
     let client = reqwest::Client::new();
     let mut last_error = String::new();
     for strict in [true, false] {
@@ -258,6 +263,15 @@ async fn openai(
         }
     }
     bail!(last_error)
+}
+
+/// HTTPS anywhere, or plain HTTP only to this machine.
+fn secure_endpoint(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return url.starts_with("https://");
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or_default();
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 fn error_message(body: &Value) -> String {
@@ -334,6 +348,23 @@ mod tests {
         });
         let parsed = openai_response(&body).unwrap();
         assert_eq!(parsed.entries[0].to_line(), "2026-10-20 13:00-17:00");
+    }
+
+    #[test]
+    fn keys_only_go_over_https_or_localhost() {
+        assert!(secure_endpoint(
+            "https://openrouter.ai/api/v1/chat/completions"
+        ));
+        assert!(secure_endpoint(
+            "http://localhost:11434/v1/chat/completions"
+        ));
+        assert!(secure_endpoint("http://127.0.0.1:1234/v1/chat/completions"));
+        assert!(!secure_endpoint(
+            "http://10.0.0.5:11434/v1/chat/completions"
+        ));
+        assert!(!secure_endpoint(
+            "http://localhost.evil.com/v1/chat/completions"
+        ));
     }
 
     #[test]
