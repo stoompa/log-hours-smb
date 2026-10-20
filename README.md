@@ -133,8 +133,6 @@ base_url = "http://localhost:11434/v1"   # Ollama; LM Studio is http://localhost
 Replies are constrained to a JSON schema; servers that reject `response_format` are
 retried with the schema in the prompt.
 
-Login and timesheet details: [docs/smb-notes.md](docs/smb-notes.md).
-
 ## Disclaimer
 
 This is an unofficial, personal tool. It is not affiliated with, endorsed by, or
