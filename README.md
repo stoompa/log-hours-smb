@@ -89,3 +89,13 @@ to a JSON schema; servers that reject `response_format` are retried with the sch
 in the prompt.
 
 Login and timesheet details: [docs/smb-notes.md](docs/smb-notes.md).
+
+## Disclaimer
+
+This is an unofficial, personal tool. It is not affiliated with, endorsed by, or
+supported by SMB HR or any employer. It is provided "as is", without warranty of any
+kind, and you use it entirely at your own risk. The author accepts no responsibility
+or liability for any loss, damage or consequence arising from its use, including
+incorrect, missing or duplicate timesheet entries, account lockouts, exposed
+credentials, or breaches of your employer's policies. You are solely responsible for
+checking that every hour it logs is accurate and that using it is allowed where you work.
